@@ -1,57 +1,158 @@
 #!/bin/bash
 
-DOMAIN=$1
-BACKUP_FILE=$2
-BASE_BACKUP="/root/wp-backups"
+set -e
 
-if [ ! -f "$BASE_BACKUP/$BACKUP_FILE" ]; then
-  echo "Backup file not found: $BASE_BACKUP/$BACKUP_FILE"
-  exit
+BASE_BACKUP="/home/wpbackup"
+TEMP_DIR="/home/wpbackup/temp"
+
+show_help() {
+cat <<EOF
+
+wprestore - CloudPanel WordPress restore utility
+
+USAGE
+  wprestore <domain> [backup_name] [restore_files yes|no] [home_user]
+
+PARAMETERS
+  domain           Domain backup folder inside /home/wpbackup
+  backup_name      Backup file name WITHOUT .tar.gz (optional)
+  restore_files    yes | no   (default: no)
+  home_user        user folder inside /home (required if restore_files=yes)
+
+EXAMPLES
+
+Restore latest database only
+  wprestore ont.mavrey.com
+
+Restore specific backup database
+  wprestore ont.mavrey.com ont.mavrey.com_backup_20260316-1635
+
+Restore database + files
+  wprestore ont.mavrey.com "" yes mavrey-ont
+
+This will:
+
+1. Import all .sql.gz databases
+2. Delete everything inside
+   /home/mavrey-ont/htdocs/ont.mavrey.com
+3. Extract website files from backup (excluding SQL)
+
+EOF
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    show_help
+    exit 0
 fi
 
-# Create temporary folder to extract
-TMP_DIR=$(mktemp -d)
-tar -xzf "$BASE_BACKUP/$BACKUP_FILE" -C "$TMP_DIR"
+DOMAIN="$1"
+BACKUP_NAME="$2"
+RESTORE_FILES="${3:-no}"
+HOME_USER="$4"
 
-# Paths inside backup
-DB_SQL="$TMP_DIR/database.sql"
-FILES_DIR="$TMP_DIR/files"
+if [ -z "$DOMAIN" ]; then
+    show_help
+    exit 1
+fi
 
-# Detect site path in /home based on domain
-SITE_PATH=$(find /home -type d -name "$DOMAIN" | head -n1)
-if [ -z "$SITE_PATH" ]; then
-  # If missing, create under first CloudPanel user folder
-  USER_DIR=$(find /home -maxdepth 1 -type d | head -n1)
-  SITE_PATH="$USER_DIR/htdocs/$DOMAIN"
-  mkdir -p "$SITE_PATH"
-  echo "Created site folder: $SITE_PATH"
+DOMAIN_DIR="$BASE_BACKUP/$DOMAIN"
+
+if [ ! -d "$DOMAIN_DIR" ]; then
+    echo "Backup folder not found: $DOMAIN_DIR"
+    exit 1
+fi
+
+mkdir -p "$TEMP_DIR"
+
+# Determine backup file
+if [ -z "$BACKUP_NAME" ]; then
+    BACKUP_FILE=$(ls -t "$DOMAIN_DIR"/*.tar.gz 2>/dev/null | head -n1)
 else
-  # Remove old files if folder exists
-  rm -rf "$SITE_PATH"/*
+    BACKUP_FILE="$DOMAIN_DIR/$BACKUP_NAME.tar.gz"
 fi
 
-# Copy files
-cp -r "$FILES_DIR/"* "$SITE_PATH"
+if [ ! -f "$BACKUP_FILE" ]; then
+    echo "Backup not found"
+    exit 1
+fi
 
-# Restore database
-if command -v wp >/dev/null 2>&1; then
-  wp db import "$DB_SQL" --path="$SITE_PATH" --allow-root
+echo "Using backup:"
+echo "$BACKUP_FILE"
+
+echo
+echo "Cleaning temp folder..."
+rm -rf "$TEMP_DIR"/*
+mkdir -p "$TEMP_DIR"
+
+echo "Extracting backup..."
+tar -xzf "$BACKUP_FILE" -C "$TEMP_DIR"
+
+echo
+echo "Searching for SQL files..."
+
+SQL_FILES=$(find "$TEMP_DIR" -name "*.sql.gz")
+
+if [ -n "$SQL_FILES" ]; then
+
+for SQL in $SQL_FILES
+do
+
+    DB_NAME=$(basename "$SQL" .sql.gz)
+
+    echo
+    echo "Importing database: $DB_NAME"
+
+    clpctl db:import \
+        --databaseName="$DB_NAME" \
+        --file="$SQL"
+
+done
+
 else
-  # Parse DB credentials from wp-config.php if exists, else ask
-  if [ -f "$SITE_PATH/wp-config.php" ]; then
-    DB_NAME=$(grep "DB_NAME" $SITE_PATH/wp-config.php | head -1 | awk -F"'" '{print $4}')
-    DB_USER=$(grep "DB_USER" $SITE_PATH/wp-config.php | head -1 | awk -F"'" '{print $4}')
-    DB_PASS=$(grep "DB_PASSWORD" $SITE_PATH/wp-config.php | head -1 | awk -F"'" '{print $4}')
-  else
-    read -p "Enter DB name: " DB_NAME
-    read -p "Enter DB user: " DB_USER
-    read -sp "Enter DB password: " DB_PASS
-    echo ""
-  fi
-  mysql -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$DB_SQL"
+    echo "No SQL files found"
 fi
 
-# Cleanup
-rm -rf "$TMP_DIR"
+# FILE RESTORE
+if [ "$RESTORE_FILES" = "yes" ]; then
 
-echo "Restore completed: $DOMAIN"
+    if [ -z "$HOME_USER" ]; then
+        echo "Error: home_user required when restore_files=yes"
+        exit 1
+    fi
+
+    SITE_PATH="/home/$HOME_USER/htdocs/$DOMAIN"
+
+    if [ ! -d "$SITE_PATH" ]; then
+        echo "Site path not found:"
+        echo "$SITE_PATH"
+        exit 1
+    fi
+
+    echo
+    echo "Restoring site files..."
+
+    echo "Deleting existing files in:"
+    echo "$SITE_PATH"
+
+    rm -rf "$SITE_PATH"/* "$SITE_PATH"/.[!.]* "$SITE_PATH"/..?* 2>/dev/null || true
+
+    echo "Extracting files..."
+
+    tar \
+      --exclude='*.sql.gz' \
+      -xzf "$BACKUP_FILE" \
+      -C "$SITE_PATH"
+
+    echo "Files restored."
+fi
+
+# Cleanup temp directory
+echo
+echo "Cleaning temporary files..."
+
+rm -rf "$TEMP_DIR"
+
+echo "Temporary files removed."
+
+echo
+echo "Restore completed successfully."
