@@ -1,43 +1,86 @@
 #!/bin/bash
+# CloudPanel WordPress full backup
+# Backs up all site files + specified databases
+# Everything preserved at root of archive
+
+# Usage:
+# wpbackup <domain> "<db1 db2 ...>" [backup_name]
+
 DOMAIN=$1
-BASE_BACKUP="/root/wp-backups"
+DB_NAMES=$2         # Space-separated DBs in quotes
+CUSTOM_NAME=$3
 
-SITE_PATH=$(find /home -type f -name wp-config.php | grep "$DOMAIN" | head -n1 | sed 's|/wp-config.php||')
+BASE_BACKUP="/home/wpbackup"
 
+# --- Help option ---
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+cat << EOF
+CloudPanel WordPress Backup Script (Full site + databases)
+
+Usage:
+  wpbackup <domain> "<db1 db2 ...>" [backup_name]
+
+Arguments:
+  domain       Domain name of the site
+  "<db1 db2>"  Space-separated list of databases in quotes
+  backup_name  Optional custom backup file name
+
+Behavior:
+  - Backs up all files in the site folder (WordPress + any custom files/folders)
+  - Exports the specified databases as .sql.gz
+  - All files and databases are stored at the root of the archive
+
+Example:
+  wpbackup example.com "db1 db2" fullbackup
+
+Backups stored in:
+  /home/wpbackup/<domain>/
+EOF
+    exit 0
+fi
+
+# --- Validate input ---
+if [ -z "$DOMAIN" ] || [ -z "$DB_NAMES" ]; then
+    echo "Error: domain and database(s) required"
+    echo "Run 'wpbackup -h' for usage"
+    exit 1
+fi
+
+# --- Detect site folder ---
+SITE_PATH=$(find /home -type d -name "$DOMAIN" | head -n1)
 if [ -z "$SITE_PATH" ]; then
-  echo "WordPress site not found"
-  exit
+    echo "Site folder not found for domain: $DOMAIN"
+    exit 1
 fi
 
 DATE=$(date +%Y%m%d-%H%M)
-BACKUP_DIR="$BASE_BACKUP/$DOMAIN/$DATE"
-mkdir -p "$BACKUP_DIR"
+TMP_BACKUP="/tmp/.wp-backup-$DATE"
+mkdir -p "$TMP_BACKUP"
 
-# Export DB using wp-cli if available
-if command -v wp >/dev/null 2>&1; then
-  wp db export "$BACKUP_DIR/database.sql" --path="$SITE_PATH" --allow-root
-  DB_USER=$(grep DB_USER "$SITE_PATH/wp-config.php" | awk -F"'" '{print $4}')
-  DB_PASS=$(grep DB_PASSWORD "$SITE_PATH/wp-config.php" | awk -F"'" '{print $4}')
-  DB_NAME=$(grep DB_NAME "$SITE_PATH/wp-config.php" | awk -F"'" '{print $4}')
+# --- Export databases ---
+for DB_NAME in $DB_NAMES; do
+    echo "Exporting database: $DB_NAME"
+    clpctl db:export --databaseName="$DB_NAME" --file="$TMP_BACKUP/$DB_NAME.sql.gz"
+done
+
+# --- Copy all site files ---
+echo "Copying all site files..."
+rsync -a "$SITE_PATH"/ "$TMP_BACKUP"/
+
+# --- Create backup folder ---
+mkdir -p "$BASE_BACKUP/$DOMAIN"
+
+# --- Archive name ---
+if [ -n "$CUSTOM_NAME" ]; then
+    ARCHIVE="$BASE_BACKUP/$DOMAIN/$CUSTOM_NAME.tar.gz"
 else
-  DB_NAME=$(grep DB_NAME "$SITE_PATH/wp-config.php" | awk -F"'" '{print $4}')
-  DB_USER=$(grep DB_USER "$SITE_PATH/wp-config.php" | awk -F"'" '{print $4}')
-  DB_PASS=$(grep DB_PASSWORD "$SITE_PATH/wp-config.php" | awk -F"'" '{print $4}')
-  mysqldump -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_DIR/database.sql"
+    ARCHIVE="$BASE_BACKUP/$DOMAIN/${DOMAIN}_backup_$DATE.tar.gz"
 fi
 
-# Save DB info in a separate file
-echo "DB_NAME=$DB_NAME" > "$BACKUP_DIR/db_info.txt"
-echo "DB_USER=$DB_USER" >> "$BACKUP_DIR/db_info.txt"
-echo "DB_PASS=$DB_PASS" >> "$BACKUP_DIR/db_info.txt"
+# --- Create final archive ---
+tar -czf "$ARCHIVE" -C "$TMP_BACKUP" .
 
-# Copy files
-cp -r "$SITE_PATH" "$BACKUP_DIR/files"
+# --- Cleanup ---
+rm -rf "$TMP_BACKUP"
 
-# Compress backup
-tar -czf "$BASE_BACKUP/$DOMAIN-$DATE.tar.gz" -C "$BACKUP_DIR" .
-
-# Cleanup
-rm -rf "$BACKUP_DIR"
-
-echo "Backup completed: $BASE_BACKUP/$DOMAIN-$DATE.tar.gz"
+echo "Backup completed: $ARCHIVE"
