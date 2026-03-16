@@ -7,10 +7,15 @@ Utility command for restoring WordPress on CloudPanel.
 Open the file with nano:
 
 ```bash
-nano /usr/local/bin/wprestore
+nano /usr/local/bin/wpbackup
 ```
+```bash
 nano /usr/local/bin/wprestore
 ```
 ## Make Executable
 ```bash
+chmod +x /usr/local/bin/wpbackup
+```
+```bash
 chmod +x /usr/local/bin/wprestore
+```
